@@ -31,13 +31,14 @@ func (r *releaseDecisionRepository) List(ctx context.Context, q dto.PageQuery) (
 }
 func (r *releaseDecisionRepository) Get(ctx context.Context, id uint) (model.ReleaseDecision, error) {
 	var item model.ReleaseDecision
-	err := r.store.db.WithContext(ctx).
+	err := DBFromContext(ctx, r.store.db).
 		Preload("Revisions", func(db *gorm.DB) *gorm.DB { return db.Order("version DESC") }).
 		First(&item, id).Error
 	return item, err
 }
 func (r *releaseDecisionRepository) CreateVersioned(ctx context.Context, item *model.ReleaseDecision, actor, requestID, reason string) error {
-	return r.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return WithTransaction(ctx, r.store.db, func(txCtx context.Context) error {
+		tx := TxFrom(txCtx)
 		if err := tx.Omit("Revisions").Create(item).Error; err != nil {
 			return err
 		}
@@ -45,7 +46,8 @@ func (r *releaseDecisionRepository) CreateVersioned(ctx context.Context, item *m
 	})
 }
 func (r *releaseDecisionRepository) UpdateVersioned(ctx context.Context, id, version uint, item *model.ReleaseDecision, actor, requestID, reason string) error {
-	return r.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return WithTransaction(ctx, r.store.db, func(txCtx context.Context) error {
+		tx := TxFrom(txCtx)
 		result := tx.Model(&model.ReleaseDecision{}).Where("id = ? AND version = ?", id, version).
 			Select("*").Omit("id", "code", "created_at", "deleted_at", "Revisions").Updates(item)
 		if result.Error != nil {

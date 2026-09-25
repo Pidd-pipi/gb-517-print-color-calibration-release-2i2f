@@ -15,6 +15,14 @@ export interface DomainRecord {
   effectiveAt: string;
   evidence: string;
   relatedCode: string;
+  printRunId?: number | null;
+  colorTolerance?: number;
+  proofVerdict?: 'pass' | 'fail' | '';
+  proofMeasuredDeltaE?: number;
+  proofTolerance?: number;
+  proofActor?: string;
+  proofId?: number | null;
+  proofDecidedAt?: string;
   createdAt: string;
   updatedAt: string;
   revisions?: RevisionRecord[];
@@ -23,6 +31,8 @@ export interface DomainRecord {
 export interface RevisionRecord {
   id: number; version: number; status: string; name: string; metricValue: number;
   metricUnit: string; evidence: string; actor: string; requestId: string; reason: string; createdAt: string;
+  colorTolerance?: number; proofVerdict?: 'pass' | 'fail' | ''; proofMeasuredDeltaE?: number;
+  proofTolerance?: number; proofActor?: string; proofDecidedAt?: string;
 }
 
 export interface PageMeta { page: number; pageSize: number; total: number }

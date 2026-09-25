@@ -52,7 +52,11 @@ func (s *printRunService) Create(ctx context.Context, input dto.CreatePrintRun, 
 		Category: strings.TrimSpace(input.Category), RiskLevel: input.RiskLevel,
 		MetricValue: input.MetricValue, MetricUnit: strings.TrimSpace(input.MetricUnit),
 		EffectiveAt: input.EffectiveAt.UTC(), Evidence: strings.TrimSpace(input.Evidence),
-		RelatedCode: strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
+		RelatedCode:    strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
+		ColorTolerance: input.ColorTolerance,
+	}
+	if err := validateColorTolerance(item.ColorTolerance); err != nil {
+		return model.PrintRun{}, err
 	}
 	if err := s.repository.CreateVersioned(ctx, &item, actor, requestID, "created colour configuration"); err != nil {
 		return model.PrintRun{}, fmt.Errorf("create 印刷批次: %w", err)
@@ -80,8 +84,12 @@ func (s *printRunService) Update(ctx context.Context, id uint, input dto.UpdateP
 	current.EffectiveAt = input.EffectiveAt.UTC()
 	current.Evidence = strings.TrimSpace(input.Evidence)
 	current.RelatedCode = strings.ToUpper(strings.TrimSpace(input.RelatedCode))
+	current.ColorTolerance = input.ColorTolerance
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
+	if err := validateColorTolerance(current.ColorTolerance); err != nil {
+		return model.PrintRun{}, err
+	}
 	if err := s.repository.UpdateVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, "updated colour configuration"); err != nil {
 		return model.PrintRun{}, fmt.Errorf("update 印刷批次: %w", err)
 	}
@@ -98,6 +106,11 @@ func (s *printRunService) Transition(ctx context.Context, id uint, input dto.Tra
 	if (target == string(constants.RunStateReleased) || current.Status == string(constants.RunStateReleased)) && !canReview(role) {
 		return model.PrintRun{}, ErrForbidden
 	}
+	// The batch may only leave for release once the proof gate has passed.
+	// A failed acceptance parks the run in hold and blocks this transition.
+	if target == string(constants.RunStateReleased) && current.ProofVerdict != model.ProofVerdictPass {
+		return model.PrintRun{}, ErrProofGateBlocked
+	}
 	if !constants.CanTransition(constants.PrintRunTransitions, current.Status, target) {
 		return model.PrintRun{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
 	}
@@ -105,6 +118,8 @@ func (s *printRunService) Transition(ctx context.Context, id uint, input dto.Tra
 	current.Status = target
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
+	// Gate evidence fields on current were loaded by Get and are not changed
+	// here, so the full-column UpdateVersioned preserves the last proof verdict.
 	if err := s.repository.UpdateVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, input.Reason); err != nil {
 		return model.PrintRun{}, fmt.Errorf("transition 印刷批次: %w", err)
 	}
@@ -137,6 +152,13 @@ func (s *printRunService) StatusCounts(ctx context.Context) (map[string]int64, e
 func validatePrintRunBusinessFields(code, name, facility, owner string) error {
 	if strings.TrimSpace(code) == "" || strings.TrimSpace(name) == "" || strings.TrimSpace(facility) == "" || strings.TrimSpace(owner) == "" {
 		return ErrInvalidInput
+	}
+	return nil
+}
+
+func validateColorTolerance(tolerance float64) error {
+	if tolerance <= 0 {
+		return ErrToleranceMissing
 	}
 	return nil
 }

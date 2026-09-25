@@ -31,13 +31,14 @@ func (r *printRunRepository) List(ctx context.Context, q dto.PageQuery) (Page[mo
 }
 func (r *printRunRepository) Get(ctx context.Context, id uint) (model.PrintRun, error) {
 	var item model.PrintRun
-	err := r.store.db.WithContext(ctx).
+	err := DBFromContext(ctx, r.store.db).
 		Preload("Revisions", func(db *gorm.DB) *gorm.DB { return db.Order("version DESC") }).
 		First(&item, id).Error
 	return item, err
 }
 func (r *printRunRepository) CreateVersioned(ctx context.Context, item *model.PrintRun, actor, requestID, reason string) error {
-	return r.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return WithTransaction(ctx, r.store.db, func(txCtx context.Context) error {
+		tx := TxFrom(txCtx)
 		if err := tx.Omit("Revisions").Create(item).Error; err != nil {
 			return err
 		}
@@ -45,7 +46,8 @@ func (r *printRunRepository) CreateVersioned(ctx context.Context, item *model.Pr
 	})
 }
 func (r *printRunRepository) UpdateVersioned(ctx context.Context, id, version uint, item *model.PrintRun, actor, requestID, reason string) error {
-	return r.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return WithTransaction(ctx, r.store.db, func(txCtx context.Context) error {
+		tx := TxFrom(txCtx)
 		result := tx.Model(&model.PrintRun{}).Where("id = ? AND version = ?", id, version).
 			Select("*").Omit("id", "code", "created_at", "deleted_at", "Revisions").Updates(item)
 		if result.Error != nil {
@@ -64,6 +66,9 @@ func printRunRevision(item *model.PrintRun, actor, requestID, reason string) *mo
 		Facility: item.Facility, Owner: item.Owner, Category: item.Category,
 		RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
 		Evidence: item.Evidence, RelatedCode: item.RelatedCode,
+		ColorTolerance: item.ColorTolerance, ProofVerdict: item.ProofVerdict,
+		ProofMeasuredDeltaE: item.ProofMeasuredDeltaE, ProofTolerance: item.ProofTolerance,
+		ProofActor: item.ProofActor, ProofID: item.ProofID, ProofDecidedAt: item.ProofDecidedAt,
 		Actor: actor, RequestID: requestID, Reason: reason,
 	}
 }

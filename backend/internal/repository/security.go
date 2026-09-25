@@ -40,7 +40,7 @@ func (r *securityRepository) CountUsers(ctx context.Context) (int64, error) {
 }
 
 func (r *securityRepository) AppendAudit(ctx context.Context, log *model.AuditLog) error {
-	return r.db.WithContext(ctx).Create(log).Error
+	return DBFromContext(ctx, r.db).Create(log).Error
 }
 
 func (r *securityRepository) ListAudits(ctx context.Context, page, pageSize int, search string) ([]model.AuditLog, int64, error) {

@@ -16,6 +16,9 @@ type ColorProof struct {
 	EffectiveAt time.Time `json:"effectiveAt"`
 	Evidence    string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode string    `json:"relatedCode" gorm:"size:64;index"`
+	// PrintRunID binds the proof to the batch whose tolerance it is judged
+	// against. Accepting the proof atomically drives that run's proof gate.
+	PrintRunID *uint `json:"printRunId" gorm:"index"`
 }
 
 func (item *ColorProof) GetBase() *BaseModel { return &item.BaseModel }

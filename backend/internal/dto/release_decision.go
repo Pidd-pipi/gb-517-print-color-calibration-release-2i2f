@@ -17,6 +17,9 @@ type CreateReleaseDecision struct {
 	EffectiveAt time.Time `json:"effectiveAt" binding:"required"`
 	Evidence    string    `json:"evidence" binding:"max=2000"`
 	RelatedCode string    `json:"relatedCode" binding:"max=64"`
+	// PrintRunID binds the decision to the batch it releases. The batch's
+	// proof gate must have passed before a draft is allowed.
+	PrintRunID *uint `json:"printRunId" binding:"required"`
 }
 
 type UpdateReleaseDecision struct {
@@ -32,4 +35,5 @@ type UpdateReleaseDecision struct {
 	EffectiveAt     time.Time `json:"effectiveAt" binding:"required"`
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
+	PrintRunID      *uint     `json:"printRunId" binding:"required"`
 }

@@ -17,6 +17,9 @@ type CreatePrintRun struct {
 	EffectiveAt time.Time `json:"effectiveAt" binding:"required"`
 	Evidence    string    `json:"evidence" binding:"max=2000"`
 	RelatedCode string    `json:"relatedCode" binding:"max=64"`
+	// ColorTolerance is the batch ΔE limit (>= 0). A proof measured above it
+	// parks the run in hold on acceptance.
+	ColorTolerance float64 `json:"colorTolerance"`
 }
 
 type UpdatePrintRun struct {
@@ -32,4 +35,5 @@ type UpdatePrintRun struct {
 	EffectiveAt     time.Time `json:"effectiveAt" binding:"required"`
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
+	ColorTolerance  float64   `json:"colorTolerance"`
 }

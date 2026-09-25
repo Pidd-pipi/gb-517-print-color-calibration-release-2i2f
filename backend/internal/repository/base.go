@@ -28,7 +28,7 @@ func NewStore[T any](db *gorm.DB) *Store[T] { return &Store[T]{db: db} }
 
 func (s *Store[T]) List(ctx context.Context, query dto.PageQuery) (Page[T], error) {
 	page, pageSize := normalizePage(query.Page, query.PageSize)
-	db := s.db.WithContext(ctx).Model(new(T))
+	db := DBFromContext(ctx, s.db).Model(new(T))
 	if search := strings.TrimSpace(strings.ToLower(query.Search)); search != "" {
 		wildcard := "%" + search + "%"
 		db = db.Where("LOWER(code) LIKE ? OR LOWER(name) LIKE ?", wildcard, wildcard)
@@ -48,16 +48,16 @@ func (s *Store[T]) List(ctx context.Context, query dto.PageQuery) (Page[T], erro
 
 func (s *Store[T]) Get(ctx context.Context, id uint) (T, error) {
 	var item T
-	err := s.db.WithContext(ctx).First(&item, id).Error
+	err := DBFromContext(ctx, s.db).First(&item, id).Error
 	return item, err
 }
 
 func (s *Store[T]) Create(ctx context.Context, item *T) error {
-	return s.db.WithContext(ctx).Create(item).Error
+	return DBFromContext(ctx, s.db).Create(item).Error
 }
 
 func (s *Store[T]) Update(ctx context.Context, id, expectedVersion uint, item *T) error {
-	result := s.db.WithContext(ctx).Model(new(T)).
+	result := DBFromContext(ctx, s.db).Model(new(T)).
 		Where("id = ? AND version = ?", id, expectedVersion).
 		Select("*").Omit("id", "code", "created_at", "deleted_at").Updates(item)
 	if result.Error != nil {
@@ -70,7 +70,7 @@ func (s *Store[T]) Update(ctx context.Context, id, expectedVersion uint, item *T
 }
 
 func (s *Store[T]) Delete(ctx context.Context, id uint) error {
-	result := s.db.WithContext(ctx).Delete(new(T), id)
+	result := DBFromContext(ctx, s.db).Delete(new(T), id)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -81,7 +81,7 @@ func (s *Store[T]) Delete(ctx context.Context, id uint) error {
 }
 
 func (s *Store[T]) CountByStatus(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.db.WithContext(ctx).Model(new(T)).
+	rows, err := DBFromContext(ctx, s.db).Model(new(T)).
 		Select("status, COUNT(*) AS total").Group("status").Rows()
 	if err != nil {
 		return nil, err

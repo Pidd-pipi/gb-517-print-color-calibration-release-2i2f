@@ -60,9 +60,67 @@ viewer_write_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://12
 viewer_audit_status=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${BACKEND_PORT}/api/audits" -H "Authorization: Bearer $viewer_token")
 [ "$viewer_audit_status" = "403" ]
 
+# Proof acceptance directly drives the linked batch. Build a batch with a
+# tolerance, move it to proofing, then accept an in-tolerance and an
+# over-tolerance proof and assert the batch gate state in both directions.
+gate_run_code="PR-GATE-$(date +%s)"
+gate_run_payload=$(printf '{"code":"%s","name":"Runtime proof-gated batch","description":"Tolerance gate validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"medium","metricValue":0.5,"metricUnit":"dE","effectiveAt":"%s","evidence":"batch colour configuration","relatedCode":"REL-GATE","colorTolerance":3.0}' "$gate_run_code" "$now")
+gate_run=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/runs" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$gate_run_payload")
+gate_run_id=$(printf '%s' "$gate_run" | jq -er '.data.id')
+gate_run_version=$(printf '%s' "$gate_run" | jq -er '.data.version')
+gate_run_path="http://127.0.0.1:${BACKEND_PORT}/api/runs/$gate_run_id/transition"
+curl -fsS -X POST "$gate_run_path" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "{\"status\":\"printing\",\"expectedVersion\":$gate_run_version,\"reason\":\"plates and ink verified\"}" >/dev/null
+gate_run_version=2
+curl -fsS -X POST "$gate_run_path" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "{\"status\":\"proofing\",\"expectedVersion\":$gate_run_version,\"reason\":\"ready for proof\"}" >/dev/null
+gate_run_version=3
+# Releasing before any passed proof is blocked.
+early_release_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$gate_run_path" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d "{\"status\":\"released\",\"expectedVersion\":$gate_run_version,\"reason\":\"skip proof attempt\"}")
+[ "$early_release_status" = "409" ]
+
+# First proof is over tolerance: acceptance parks the batch in hold.
+bad_proof_code="CP-GATE-BAD-$(date +%s)"
+bad_proof_payload=$(printf '{"code":"%s","name":"Runtime over-tolerance proof","description":"Gate fail validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"high","metricValue":4.6,"metricUnit":"dE","effectiveAt":"%s","evidence":"over limit strip","relatedCode":"REL-GATE","printRunId":%s}' "$bad_proof_code" "$now" "$gate_run_id")
+bad_proof=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$bad_proof_payload")
+bad_proof_id=$(printf '%s' "$bad_proof" | jq -er '.data.id')
+bad_proof_version=$(printf '%s' "$bad_proof" | jq -er '.data.version')
+bad_proof_path="http://127.0.0.1:${BACKEND_PORT}/api/proofs/$bad_proof_id/transition"
+curl -fsS -X POST "$bad_proof_path" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "{\"status\":\"review\",\"expectedVersion\":$bad_proof_version,\"reason\":\"sample captured\"}" >/dev/null
+bad_proof_version=2
+curl -fsS -X POST "$bad_proof_path" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d "{\"status\":\"accepted\",\"expectedVersion\":$bad_proof_version,\"expectedRunVersion\":$gate_run_version,\"reason\":\"delta E over tolerance\"}" >/dev/null
+curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/runs/$gate_run_id" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.status == "hold" and .data.proofVerdict == "fail" and .data.proofMeasuredDeltaE == 4.6 and .data.proofTolerance == 3.0 and .data.proofActor == "reviewer"' >/dev/null
+gate_run_version=4
+# A held batch cannot receive a release decision draft.
+blocked_decision_code="RD-GATE-BLOCKED-$(date +%s)"
+blocked_decision_payload=$(printf '{"code":"%s","name":"Blocked decision","description":"Must be rejected while held","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"high","metricValue":4.6,"metricUnit":"dE","effectiveAt":"%s","evidence":"held batch","relatedCode":"REL-GATE","printRunId":%s}' "$blocked_decision_code" "$now" "$gate_run_id")
+blocked_decision_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$blocked_decision_payload")
+[ "$blocked_decision_status" = "409" ]
+
+# Re-proof within tolerance lifts the hold back to proofing.
+good_proof_code="CP-GATE-GOOD-$(date +%s)"
+good_proof_payload=$(printf '{"code":"%s","name":"Runtime passing proof","description":"Gate pass validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"low","metricValue":1.8,"metricUnit":"dE","effectiveAt":"%s","evidence":"within tolerance strip","relatedCode":"REL-GATE","printRunId":%s}' "$good_proof_code" "$now" "$gate_run_id")
+good_proof=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$good_proof_payload")
+good_proof_id=$(printf '%s' "$good_proof" | jq -er '.data.id')
+good_proof_version=$(printf '%s' "$good_proof" | jq -er '.data.version')
+good_proof_path="http://127.0.0.1:${BACKEND_PORT}/api/proofs/$good_proof_id/transition"
+curl -fsS -X POST "$good_proof_path" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "{\"status\":\"review\",\"expectedVersion\":$good_proof_version,\"reason\":\"rework sample captured\"}" >/dev/null
+good_proof_version=2
+operator_accept_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$good_proof_path" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "{\"status\":\"accepted\",\"expectedVersion\":$good_proof_version,\"expectedRunVersion\":$gate_run_version,\"reason\":\"operator cannot accept\"}")
+[ "$operator_accept_status" = "403" ]
+# A stale batch version aborts the review and leaves the proof in review.
+stale_accept_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$good_proof_path" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d "{\"status\":\"accepted\",\"expectedVersion\":$good_proof_version,\"expectedRunVersion\":3,\"reason\":\"stale batch version\"}")
+[ "$stale_accept_status" = "409" ]
+curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/proofs/$good_proof_id" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.status == "review" and .data.version == 2' >/dev/null
+# Accepting with the current batch version keeps the batch in proofing/pass.
+curl -fsS -X POST "$good_proof_path" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -H 'X-Request-ID: proof-accept-pass-smoke' -d "{\"status\":\"accepted\",\"expectedVersion\":$good_proof_version,\"expectedRunVersion\":$gate_run_version,\"reason\":\"colour tolerance independently verified\"}" | jq -e '.data.status == "accepted"' >/dev/null
+curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/runs/$gate_run_id" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.status == "proofing" and .data.proofVerdict == "pass" and .data.proofMeasuredDeltaE == 1.8' >/dev/null
+gate_run_version=5
+
 # Release decisions are versioned and only reviewer/admin may cross the release gate.
+# The batch must be released (passed proof) before the decision can finalize.
+curl -fsS -X POST "$gate_run_path" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d "{\"status\":\"released\",\"expectedVersion\":$gate_run_version,\"reason\":\"proof passed, release batch\"}" >/dev/null
+gate_run_version=6
 decision_code="RD-SMOKE-$(date +%s)"
-decision_payload=$(printf '{"code":"%s","name":"Runtime release gate","description":"RBAC and immutable revision validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"medium","metricValue":2.2,"metricUnit":"dE","effectiveAt":"%s","evidence":"spectrophotometer validation evidence","relatedCode":"PR-001"}' "$decision_code" "$now")
+decision_payload=$(printf '{"code":"%s","name":"Runtime release gate","description":"RBAC and immutable revision validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"medium","metricValue":1.8,"metricUnit":"dE","effectiveAt":"%s","evidence":"spectrophotometer validation evidence","relatedCode":"REL-GATE","printRunId":%s}' "$decision_code" "$now" "$gate_run_id")
 decision=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -H 'X-Request-ID: release-create-smoke' -d "$decision_payload")
 decision_id=$(printf '%s' "$decision" | jq -er '.data.id')
 decision_version=$(printf '%s' "$decision" | jq -er '.data.version')
@@ -72,18 +130,5 @@ operator_release_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http:
 curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id/transition" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -H 'X-Request-ID: release-review-smoke' -d "$release_payload" | jq -e '.data.status == "release" and .data.version == 2' >/dev/null
 curl -fsS "http://127.0.0.1:${BACKEND_PORT}/api/release/$decision_id" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.revisions | length == 2 and .[0].requestId == "release-review-smoke" and .[1].requestId == "release-create-smoke"' >/dev/null
 
-# Proof capture is operational work; accepting the proof is a reviewer action.
-proof_code="CP-SMOKE-$(date +%s)"
-proof_payload=$(printf '{"code":"%s","name":"Runtime proof gate","description":"Proof acceptance validation","facility":"Validation Lab","owner":"operator","category":"calibration","riskLevel":"low","metricValue":1.8,"metricUnit":"dE","effectiveAt":"%s","evidence":"proof strip measurements","relatedCode":"PR-001"}' "$proof_code" "$now")
-proof=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$proof_payload")
-proof_id=$(printf '%s' "$proof" | jq -er '.data.id')
-proof_version=$(printf '%s' "$proof" | jq -er '.data.version')
-proof_review=$(printf '{"status":"review","expectedVersion":%s,"reason":"measurement capture completed"}' "$proof_version")
-proof=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs/$proof_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$proof_review")
-proof_version=$(printf '%s' "$proof" | jq -er '.data.version')
-proof_accept=$(printf '{"status":"accepted","expectedVersion":%s,"reason":"colour tolerance independently verified"}' "$proof_version")
-operator_accept_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs/$proof_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$proof_accept")
-[ "$operator_accept_status" = "403" ]
-curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT}/api/proofs/$proof_id/transition" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d "$proof_accept" | jq -e '.data.status == "accepted"' >/dev/null
 docker compose ps
 [ "${KEEP_RUNNING:-0}" = "1" ] && echo "KEEP_RUNNING=1: containers left running for browser validation"

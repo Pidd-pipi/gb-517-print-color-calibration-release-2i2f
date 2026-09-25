@@ -16,6 +16,7 @@ type ColorProofRepository interface {
 	Update(context.Context, uint, uint, *model.ColorProof) error
 	Delete(context.Context, uint) error
 	CountByStatus(context.Context) (map[string]int64, error)
+	DB() *gorm.DB
 }
 
 type colorProofRepository struct {
@@ -44,3 +45,7 @@ func (r *colorProofRepository) Delete(ctx context.Context, id uint) error {
 func (r *colorProofRepository) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	return r.store.CountByStatus(ctx)
 }
+
+// DB exposes the underlying handle so the proof service can open the atomic
+// proof-plus-batch transaction on acceptance.
+func (r *colorProofRepository) DB() *gorm.DB { return r.store.db }

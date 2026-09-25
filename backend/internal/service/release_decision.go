@@ -24,11 +24,12 @@ type ReleaseDecisionService interface {
 
 type releaseDecisionService struct {
 	repository repository.ReleaseDecisionRepository
+	runs       repository.PrintRunRepository
 	security   SecurityService
 }
 
-func NewReleaseDecisionService(repo repository.ReleaseDecisionRepository, security SecurityService) ReleaseDecisionService {
-	return &releaseDecisionService{repository: repo, security: security}
+func NewReleaseDecisionService(repo repository.ReleaseDecisionRepository, runs repository.PrintRunRepository, security SecurityService) ReleaseDecisionService {
+	return &releaseDecisionService{repository: repo, runs: runs, security: security}
 }
 
 func (s *releaseDecisionService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.ReleaseDecision], error) {
@@ -43,6 +44,13 @@ func (s *releaseDecisionService) Create(ctx context.Context, input dto.CreateRel
 	if err := validateReleaseDecisionBusinessFields(input.Code, input.Name, input.Facility, input.Owner); err != nil {
 		return model.ReleaseDecision{}, err
 	}
+	run, err := s.linkedRun(ctx, input.PrintRunID)
+	if err != nil {
+		return model.ReleaseDecision{}, err
+	}
+	if err := s.requirePassedProof(run); err != nil {
+		return model.ReleaseDecision{}, err
+	}
 	item := model.ReleaseDecision{
 		BaseModel: model.BaseModel{
 			Code: strings.ToUpper(strings.TrimSpace(input.Code)), Name: strings.TrimSpace(input.Name),
@@ -53,12 +61,43 @@ func (s *releaseDecisionService) Create(ctx context.Context, input dto.CreateRel
 		MetricValue: input.MetricValue, MetricUnit: strings.TrimSpace(input.MetricUnit),
 		EffectiveAt: input.EffectiveAt.UTC(), Evidence: strings.TrimSpace(input.Evidence),
 		RelatedCode: strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
+		PrintRunID:  input.PrintRunID,
 	}
 	if err := s.repository.CreateVersioned(ctx, &item, actor, requestID, "created release decision"); err != nil {
 		return model.ReleaseDecision{}, fmt.Errorf("create 放行决定: %w", err)
 	}
 	_ = s.security.Audit(ctx, actor, requestID, "create", "ReleaseDecision", item.ID, "", item.Status, "created 放行决定")
 	return item, nil
+}
+
+// linkedRun loads the batch a decision belongs to, rejecting unknown batches.
+func (s *releaseDecisionService) linkedRun(ctx context.Context, runID *uint) (model.PrintRun, error) {
+	if runID == nil || *runID == 0 {
+		return model.PrintRun{}, fmt.Errorf("%w: release decision must reference a print run", ErrInvalidInput)
+	}
+	run, err := s.runs.Get(ctx, *runID)
+	if err != nil {
+		return model.PrintRun{}, fmt.Errorf("%w: linked print run %d not found", ErrInvalidInput, *runID)
+	}
+	return run, nil
+}
+
+// requirePassedProof allows drafting a decision only after the batch's proof
+// gate has passed. A run parked in hold by an over-tolerance proof is blocked.
+func (s *releaseDecisionService) requirePassedProof(run model.PrintRun) error {
+	if run.ProofVerdict != model.ProofVerdictPass {
+		return ErrProofGateBlocked
+	}
+	return nil
+}
+
+// requireReleasedRun allows the final "release" decision only when the batch
+// itself has crossed to released (which itself demands a passed proof gate).
+func (s *releaseDecisionService) requireReleasedRun(run model.PrintRun) error {
+	if run.Status != string(constants.RunStateReleased) {
+		return ErrProofGateBlocked
+	}
+	return nil
 }
 
 func (s *releaseDecisionService) Update(ctx context.Context, id uint, input dto.UpdateReleaseDecision, actor, requestID string) (model.ReleaseDecision, error) {
@@ -72,6 +111,13 @@ func (s *releaseDecisionService) Update(ctx context.Context, id uint, input dto.
 	if err := validateReleaseDecisionBusinessFields(current.Code, input.Name, input.Facility, input.Owner); err != nil {
 		return model.ReleaseDecision{}, err
 	}
+	run, err := s.linkedRun(ctx, input.PrintRunID)
+	if err != nil {
+		return model.ReleaseDecision{}, err
+	}
+	if err := s.requirePassedProof(run); err != nil {
+		return model.ReleaseDecision{}, err
+	}
 	current.Name = strings.TrimSpace(input.Name)
 	current.Description = strings.TrimSpace(input.Description)
 	current.Facility = strings.TrimSpace(input.Facility)
@@ -83,6 +129,7 @@ func (s *releaseDecisionService) Update(ctx context.Context, id uint, input dto.
 	current.EffectiveAt = input.EffectiveAt.UTC()
 	current.Evidence = strings.TrimSpace(input.Evidence)
 	current.RelatedCode = strings.ToUpper(strings.TrimSpace(input.RelatedCode))
+	current.PrintRunID = input.PrintRunID
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
 	if err := s.repository.UpdateVersioned(ctx, id, input.ExpectedVersion, &current, actor, requestID, "updated decision evidence"); err != nil {
@@ -104,6 +151,18 @@ func (s *releaseDecisionService) Transition(ctx context.Context, id uint, input 
 	}
 	if !constants.CanTransition(constants.ReleaseDecisionTransitions, current.Status, target) {
 		return model.ReleaseDecision{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
+	}
+	// Final release is allowed only once the linked batch has itself been
+	// released (that transition in turn requires a passed proof gate), so an
+	// over-tolerance batch parked in hold can never be shipped.
+	if target == string(constants.DecisionTypeRelease) {
+		run, err := s.linkedRun(ctx, current.PrintRunID)
+		if err != nil {
+			return model.ReleaseDecision{}, err
+		}
+		if err := s.requireReleasedRun(run); err != nil {
+			return model.ReleaseDecision{}, err
+		}
 	}
 	before := current.Status
 	current.Status = target

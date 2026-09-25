@@ -26,6 +26,11 @@ type TransitionRequest struct {
 	Status          string `json:"status" binding:"required,max=40"`
 	ExpectedVersion uint   `json:"expectedVersion" binding:"required"`
 	Reason          string `json:"reason" binding:"required,min=3,max=500"`
+	// ExpectedRunVersion is used when accepting a colour proof. It carries the
+	// version of the linked batch as the reviewer saw it; if the batch moved in
+	// the meantime the optimistic-lock mismatch aborts the whole review so the
+	// proof status is never persisted on its own.
+	ExpectedRunVersion uint `json:"expectedRunVersion"`
 }
 
 type AuditSummaryQuery struct {

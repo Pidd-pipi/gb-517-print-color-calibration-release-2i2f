@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/blueship581/print-color-calibration-release/backend/internal/config"
+	"github.com/blueship581/print-color-calibration-release/backend/internal/constants"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/model"
 	"github.com/glebarez/sqlite"
 	"github.com/redis/go-redis/v9"
@@ -156,22 +157,41 @@ func seedPrintRun(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	proofPassActor := "reviewer"
 	items := []model.PrintRun{
 
 		{BaseModel: model.BaseModel{Code: "PR-001", Name: "印刷批次示例一", Status: "setup", Version: 1,
 			Description: "用于启动验证和主要流程演示的印刷批次记录"}, Facility: "印刷色彩批次校准放行区域1", Owner: "运行一组",
 			Category: "常规", RiskLevel: "low", MetricValue: 12.5, MetricUnit: "unit",
-			EffectiveAt: now.Add(0 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-01"},
+			EffectiveAt: now.Add(0 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-01",
+			ColorTolerance: 3.0},
 
 		{BaseModel: model.BaseModel{Code: "PR-002", Name: "印刷批次示例二", Status: "printing", Version: 1,
 			Description: "用于启动验证和主要流程演示的印刷批次记录"}, Facility: "印刷色彩批次校准放行区域2", Owner: "质量复核组",
 			Category: "重点", RiskLevel: "medium", MetricValue: 25.0, MetricUnit: "%",
-			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-02"},
+			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-02",
+			ColorTolerance: 3.0},
 
 		{BaseModel: model.BaseModel{Code: "PR-003", Name: "印刷批次示例三", Status: "proofing", Version: 1,
-			Description: "用于启动验证和主要流程演示的印刷批次记录"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
+			Description: "校样已合格、等待建立放行决定的批次"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
-			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
+			EffectiveAt: now.Add(6 * time.Hour), Evidence: "校样 ΔE 在容差内", RelatedCode: "REL-517-03",
+			ColorTolerance: 3.0, ProofVerdict: model.ProofVerdictPass, ProofMeasuredDeltaE: 1.8,
+			ProofTolerance: 3.0, ProofActor: proofPassActor, ProofDecidedAt: now.Add(6 * time.Hour)},
+
+		{BaseModel: model.BaseModel{Code: "PR-004", Name: "印刷批次示例四", Status: "hold", Version: 2,
+			Description: "校样色差超容差、已被转入等待的批次"}, Facility: "印刷色彩批次校准放行区域4", Owner: "质量复核组",
+			Category: "复核", RiskLevel: "critical", MetricValue: 42.0, MetricUnit: "score",
+			EffectiveAt: now.Add(9 * time.Hour), Evidence: "校样 ΔE 超容差，等待返修后重新校样", RelatedCode: "REL-517-04",
+			ColorTolerance: 3.0, ProofVerdict: model.ProofVerdictFail, ProofMeasuredDeltaE: 4.6,
+			ProofTolerance: 3.0, ProofActor: proofPassActor, ProofDecidedAt: now.Add(9 * time.Hour)},
+
+		{BaseModel: model.BaseModel{Code: "PR-005", Name: "印刷批次示例五", Status: "released", Version: 2,
+			Description: "校样合格并完成放行的批次"}, Facility: "印刷色彩批次校准放行区域5", Owner: "运行一组",
+			Category: "常规", RiskLevel: "low", MetricValue: 18.0, MetricUnit: "unit",
+			EffectiveAt: now.Add(12 * time.Hour), Evidence: "校样合格，批次已放行", RelatedCode: "REL-517-05",
+			ColorTolerance: 3.0, ProofVerdict: model.ProofVerdictPass, ProofMeasuredDeltaE: 2.0,
+			ProofTolerance: 3.0, ProofActor: proofPassActor, ProofDecidedAt: now.Add(12 * time.Hour)},
 	}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Omit("Revisions").Create(&items).Error; err != nil {
@@ -179,12 +199,36 @@ func seedPrintRun(ctx context.Context, db *gorm.DB) error {
 		}
 		revisions := make([]model.PrintRunRevision, 0, len(items))
 		for _, item := range items {
-			revisions = append(revisions, model.PrintRunRevision{
+			revision := model.PrintRunRevision{
 				PrintRunID: item.ID, Version: item.Version, Status: item.Status, Name: item.Name,
 				Facility: item.Facility, Owner: item.Owner, Category: item.Category,
 				RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
 				Evidence: item.Evidence, RelatedCode: item.RelatedCode,
+				ColorTolerance: item.ColorTolerance, ProofVerdict: item.ProofVerdict,
+				ProofMeasuredDeltaE: item.ProofMeasuredDeltaE, ProofTolerance: item.ProofTolerance,
+				ProofActor: item.ProofActor, ProofDecidedAt: item.ProofDecidedAt,
 				Actor: "seed", RequestID: "startup-seed", Reason: "initial colour configuration",
+			}
+			revisions = append(revisions, revision)
+		}
+		// Gate verdicts for the demo runs are historical: add the v1 snapshot
+		// for the runs that now sit at v2 so the revision chain stays complete.
+		for idx := range items {
+			item := items[idx]
+			if item.Version <= 1 {
+				continue
+			}
+			v1Status := string(constants.RunStateProofing)
+			reason := "proof pass kept batch in proofing"
+			if item.ProofVerdict == model.ProofVerdictFail {
+				reason = "proof fail parked batch in hold"
+			}
+			revisions = append(revisions, model.PrintRunRevision{
+				PrintRunID: item.ID, Version: 1, Status: v1Status, Name: item.Name,
+				Facility: item.Facility, Owner: item.Owner, Category: item.Category,
+				RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
+				Evidence: item.Evidence, RelatedCode: item.RelatedCode, ColorTolerance: item.ColorTolerance,
+				Actor: "seed", RequestID: "startup-seed", Reason: reason,
 			})
 		}
 		return tx.Create(&revisions).Error
@@ -197,24 +241,74 @@ func seedColorProof(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	var runs []model.PrintRun
+	if err := db.WithContext(ctx).Order("code ASC").Find(&runs).Error; err != nil {
+		return err
+	}
+	runID := func(code string) *uint {
+		for i := range runs {
+			if runs[i].Code == code {
+				id := runs[i].ID
+				return &id
+			}
+		}
+		return nil
+	}
 	items := []model.ColorProof{
 
 		{BaseModel: model.BaseModel{Code: "CP-001", Name: "色彩校样示例一", Status: "captured", Version: 1,
-			Description: "用于启动验证和主要流程演示的色彩校样记录"}, Facility: "印刷色彩批次校准放行区域1", Owner: "运行一组",
-			Category: "常规", RiskLevel: "low", MetricValue: 12.5, MetricUnit: "unit",
-			EffectiveAt: now.Add(0 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-01"},
+			Description: "已采集、待提交复核的校样"}, Facility: "印刷色彩批次校准放行区域1", Owner: "运行一组",
+			Category: "常规", RiskLevel: "low", MetricValue: 1.4, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(0 * time.Hour), Evidence: "分光密度仪首件读数", RelatedCode: "REL-517-01",
+			PrintRunID: runID("PR-001")},
 
 		{BaseModel: model.BaseModel{Code: "CP-002", Name: "色彩校样示例二", Status: "review", Version: 1,
-			Description: "用于启动验证和主要流程演示的色彩校样记录"}, Facility: "印刷色彩批次校准放行区域2", Owner: "质量复核组",
-			Category: "重点", RiskLevel: "medium", MetricValue: 25.0, MetricUnit: "%",
-			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-02"},
+			Description: "已提交、等待复核员接收的校样"}, Facility: "印刷色彩批次校准放行区域2", Owner: "质量复核组",
+			Category: "重点", RiskLevel: "medium", MetricValue: 2.3, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(3 * time.Hour), Evidence: "印刷中抽样读数", RelatedCode: "REL-517-02",
+			PrintRunID: runID("PR-002")},
 
 		{BaseModel: model.BaseModel{Code: "CP-003", Name: "色彩校样示例三", Status: "accepted", Version: 1,
-			Description: "用于启动验证和主要流程演示的色彩校样记录"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
-			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
-			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
+			Description: "色差合格、批次保持校样中并允许放行"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
+			Category: "复核", RiskLevel: "high", MetricValue: 1.8, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(6 * time.Hour), Evidence: "ΔE 1.8 在容差 3.0 内", RelatedCode: "REL-517-03",
+			PrintRunID: runID("PR-003")},
+
+		{BaseModel: model.BaseModel{Code: "CP-004", Name: "色彩校样示例四", Status: "accepted", Version: 1,
+			Description: "色差超容差、批次已转入等待"}, Facility: "印刷色彩批次校准放行区域4", Owner: "质量复核组",
+			Category: "复核", RiskLevel: "critical", MetricValue: 4.6, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(9 * time.Hour), Evidence: "ΔE 4.6 超出容差 3.0", RelatedCode: "REL-517-04",
+			PrintRunID: runID("PR-004")},
+
+		{BaseModel: model.BaseModel{Code: "CP-005", Name: "色彩校样示例五", Status: "accepted", Version: 1,
+			Description: "色差合格、支撑批次放行"}, Facility: "印刷色彩批次校准放行区域5", Owner: "运行一组",
+			Category: "常规", RiskLevel: "low", MetricValue: 2.0, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(12 * time.Hour), Evidence: "ΔE 2.0 在容差 3.0 内", RelatedCode: "REL-517-05",
+			PrintRunID: runID("PR-005")},
 	}
-	return db.WithContext(ctx).Create(&items).Error
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&items).Error; err != nil {
+			return err
+		}
+		// Backfill the gate evidence's proof pointer on the affected batches.
+		proofByRun := map[uint]uint{}
+		for _, p := range items {
+			if p.PrintRunID != nil {
+				proofByRun[*p.PrintRunID] = p.ID
+			}
+		}
+		for i := range runs {
+			pid, ok := proofByRun[runs[i].ID]
+			if !ok {
+				continue
+			}
+			if err := tx.Model(&model.PrintRun{}).Where("id = ?", runs[i].ID).
+				Update("proof_id", pid).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func seedReleaseDecision(ctx context.Context, db *gorm.DB) error {
@@ -223,22 +317,38 @@ func seedReleaseDecision(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	var runs []model.PrintRun
+	if err := db.WithContext(ctx).Order("code ASC").Find(&runs).Error; err != nil {
+		return err
+	}
+	runID := func(code string) *uint {
+		for i := range runs {
+			if runs[i].Code == code {
+				id := runs[i].ID
+				return &id
+			}
+		}
+		return nil
+	}
 	items := []model.ReleaseDecision{
 
 		{BaseModel: model.BaseModel{Code: "RD-001", Name: "放行决定示例一", Status: "draft", Version: 1,
-			Description: "用于启动验证和主要流程演示的放行决定记录"}, Facility: "印刷色彩批次校准放行区域1", Owner: "运行一组",
-			Category: "常规", RiskLevel: "low", MetricValue: 12.5, MetricUnit: "unit",
-			EffectiveAt: now.Add(0 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-01"},
+			Description: "校样合格、待复核员放行的草稿"}, Facility: "印刷色彩批次校准放行区域3", Owner: "运行一组",
+			Category: "常规", RiskLevel: "high", MetricValue: 1.8, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(6 * time.Hour), Evidence: "依据 CP-003 的合格校样", RelatedCode: "REL-517-03",
+			PrintRunID: runID("PR-003")},
 
 		{BaseModel: model.BaseModel{Code: "RD-002", Name: "放行决定示例二", Status: "release", Version: 1,
-			Description: "用于启动验证和主要流程演示的放行决定记录"}, Facility: "印刷色彩批次校准放行区域2", Owner: "质量复核组",
-			Category: "重点", RiskLevel: "medium", MetricValue: 25.0, MetricUnit: "%",
-			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-02"},
+			Description: "校样合格、批次已完成放行"}, Facility: "印刷色彩批次校准放行区域5", Owner: "质量复核组",
+			Category: "重点", RiskLevel: "low", MetricValue: 2.0, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(12 * time.Hour), Evidence: "依据 CP-005 的合格校样放行", RelatedCode: "REL-517-05",
+			PrintRunID: runID("PR-005")},
 
 		{BaseModel: model.BaseModel{Code: "RD-003", Name: "放行决定示例三", Status: "rework", Version: 1,
-			Description: "用于启动验证和主要流程演示的放行决定记录"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
-			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
-			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
+			Description: "色差超容差、批次转等待并要求返修"}, Facility: "印刷色彩批次校准放行区域4", Owner: "安全主管组",
+			Category: "复核", RiskLevel: "critical", MetricValue: 4.6, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(9 * time.Hour), Evidence: "依据 CP-004 的不合格校样返修", RelatedCode: "REL-517-04",
+			PrintRunID: runID("PR-004")},
 	}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Omit("Revisions").Create(&items).Error; err != nil {
