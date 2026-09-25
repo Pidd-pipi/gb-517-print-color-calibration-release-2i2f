@@ -1,0 +1,90 @@
+
+name: print-color-calibration-release
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: ${COMPOSE_PROJECT_NAME:-print-color-calibration-release}-db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    ports:
+      - "${DB_PORT:-20517}:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p${DB_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 4s
+      retries: 25
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-print-color-calibration-release}-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT:-21517}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-print-color-calibration-release}-backend
+    restart: unless-stopped
+    environment:
+      APP_NAME: print-color-calibration-release
+      APP_ENV: production
+      PORT: 8080
+      DATABASE_DRIVER: mysql
+      DATABASE_DSN: "${DB_USER}:${DB_PASSWORD}@tcp(db:3306)/${DB_NAME}?charset=utf8mb4&parseTime=True&loc=Local"
+      REDIS_ADDR: redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      TOKEN_TTL: 8h
+      REQUEST_LIMIT: 240
+
+    ports:
+      - "${BACKEND_PORT:-19517}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 25
+      start_period: 8s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-print-color-calibration-release}-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-18517}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+
+volumes:
+  db_data:
+  redis_data:
