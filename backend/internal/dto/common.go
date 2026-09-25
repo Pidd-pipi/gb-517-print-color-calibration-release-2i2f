@@ -26,6 +26,11 @@ type TransitionRequest struct {
 	Status          string `json:"status" binding:"required,max=40"`
 	ExpectedVersion uint   `json:"expectedVersion" binding:"required"`
 	Reason          string `json:"reason" binding:"required,min=3,max=500"`
+	// ExpectedRunVersion is used when accepting a 色彩校样. It carries the
+	// version of the linked 印刷批次 the reviewer saw, so a batch that changed
+	// during the same review makes the whole request fail instead of letting
+	// the proof status land on its own.
+	ExpectedRunVersion uint `json:"expectedRunVersion"`
 }
 
 type AuditSummaryQuery struct {

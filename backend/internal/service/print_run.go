@@ -51,6 +51,7 @@ func (s *printRunService) Create(ctx context.Context, input dto.CreatePrintRun, 
 		Facility: strings.TrimSpace(input.Facility), Owner: strings.TrimSpace(input.Owner),
 		Category: strings.TrimSpace(input.Category), RiskLevel: input.RiskLevel,
 		MetricValue: input.MetricValue, MetricUnit: strings.TrimSpace(input.MetricUnit),
+		Tolerance:   input.Tolerance,
 		EffectiveAt: input.EffectiveAt.UTC(), Evidence: strings.TrimSpace(input.Evidence),
 		RelatedCode: strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
 	}
@@ -77,6 +78,7 @@ func (s *printRunService) Update(ctx context.Context, id uint, input dto.UpdateP
 	current.RiskLevel = input.RiskLevel
 	current.MetricValue = input.MetricValue
 	current.MetricUnit = strings.TrimSpace(input.MetricUnit)
+	current.Tolerance = input.Tolerance
 	current.EffectiveAt = input.EffectiveAt.UTC()
 	current.Evidence = strings.TrimSpace(input.Evidence)
 	current.RelatedCode = strings.ToUpper(strings.TrimSpace(input.RelatedCode))

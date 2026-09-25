@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/blueship581/print-color-calibration-release/backend/internal/dto"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/model"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/repository"
+	"gorm.io/gorm"
 )
 
 type ReleaseDecisionService interface {
@@ -24,11 +26,34 @@ type ReleaseDecisionService interface {
 
 type releaseDecisionService struct {
 	repository repository.ReleaseDecisionRepository
+	runs       repository.PrintRunRepository
 	security   SecurityService
 }
 
-func NewReleaseDecisionService(repo repository.ReleaseDecisionRepository, security SecurityService) ReleaseDecisionService {
-	return &releaseDecisionService{repository: repo, security: security}
+func NewReleaseDecisionService(repo repository.ReleaseDecisionRepository, runs repository.PrintRunRepository, security SecurityService) ReleaseDecisionService {
+	return &releaseDecisionService{repository: repo, runs: runs, security: security}
+}
+
+// ensureLinkedRunReleasable blocks decisions whose linked batch is on hold.
+// A run lands in hold only when a proof was accepted with a measurement past
+// the batch tolerance, so creating or releasing a decision against it would
+// silently bypass the quality gate.
+func (s *releaseDecisionService) ensureLinkedRunReleasable(ctx context.Context, relatedCode string) error {
+	code := strings.ToUpper(strings.TrimSpace(relatedCode))
+	if code == "" {
+		return nil
+	}
+	run, err := s.runs.GetByCode(ctx, code)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if run.Status == string(constants.RunStateHold) {
+		return fmt.Errorf("%w: %s 待复检合格后再放行", ErrBatchHeld, run.Code)
+	}
+	return nil
 }
 
 func (s *releaseDecisionService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.ReleaseDecision], error) {
@@ -41,6 +66,9 @@ func (s *releaseDecisionService) Get(ctx context.Context, id uint) (model.Releas
 
 func (s *releaseDecisionService) Create(ctx context.Context, input dto.CreateReleaseDecision, actor, requestID string) (model.ReleaseDecision, error) {
 	if err := validateReleaseDecisionBusinessFields(input.Code, input.Name, input.Facility, input.Owner); err != nil {
+		return model.ReleaseDecision{}, err
+	}
+	if err := s.ensureLinkedRunReleasable(ctx, input.RelatedCode); err != nil {
 		return model.ReleaseDecision{}, err
 	}
 	item := model.ReleaseDecision{
@@ -104,6 +132,11 @@ func (s *releaseDecisionService) Transition(ctx context.Context, id uint, input 
 	}
 	if !constants.CanTransition(constants.ReleaseDecisionTransitions, current.Status, target) {
 		return model.ReleaseDecision{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
+	}
+	if target == string(constants.DecisionTypeRelease) {
+		if err := s.ensureLinkedRunReleasable(ctx, current.RelatedCode); err != nil {
+			return model.ReleaseDecision{}, err
+		}
 	}
 	before := current.Status
 	current.Status = target

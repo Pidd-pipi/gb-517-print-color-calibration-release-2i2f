@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/blueship581/print-color-calibration-release/backend/internal/dto"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/model"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/repository"
+	"gorm.io/gorm"
 )
 
 type ColorProofService interface {
@@ -22,13 +24,20 @@ type ColorProofService interface {
 	StatusCounts(context.Context) (map[string]int64, error)
 }
 
+// Proof judgement verdicts frozen into PrintRunRevision.ProofVerdict.
+const (
+	ProofVerdictWithinTolerance = "within-tolerance"
+	ProofVerdictOutOfTolerance  = "out-of-tolerance"
+)
+
 type colorProofService struct {
 	repository repository.ColorProofRepository
+	runs       repository.PrintRunRepository
 	security   SecurityService
 }
 
-func NewColorProofService(repo repository.ColorProofRepository, security SecurityService) ColorProofService {
-	return &colorProofService{repository: repo, security: security}
+func NewColorProofService(repo repository.ColorProofRepository, runs repository.PrintRunRepository, security SecurityService) ColorProofService {
+	return &colorProofService{repository: repo, runs: runs, security: security}
 }
 
 func (s *colorProofService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.ColorProof], error) {
@@ -101,15 +110,72 @@ func (s *colorProofService) Transition(ctx context.Context, id uint, input dto.T
 	if !constants.CanTransition(constants.ColorProofTransitions, current.Status, target) {
 		return model.ColorProof{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
 	}
-	before := current.Status
+	if target != "accepted" {
+		before := current.Status
+		current.Status = target
+		current.Version = input.ExpectedVersion + 1
+		current.UpdatedAt = time.Now().UTC()
+		if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current); err != nil {
+			return model.ColorProof{}, fmt.Errorf("transition 色彩校样: %w", err)
+		}
+		if err := s.security.Audit(ctx, actor, requestID, "transition", "ColorProof", id, before, target, input.Reason); err != nil {
+			return model.ColorProof{}, fmt.Errorf("persist transition audit: %w", err)
+		}
+		return s.repository.Get(ctx, id)
+	}
+
+	// Acceptance is the quality gate: read the linked batch at the version the
+	// reviewer saw, compare the proof measurement against the batch tolerance
+	// and commit proof status, batch state and evidence in one transaction.
+	runCode := strings.ToUpper(strings.TrimSpace(current.RelatedCode))
+	if runCode == "" {
+		return model.ColorProof{}, ErrBatchNotLinked
+	}
+	run, err := s.runs.GetByCode(ctx, runCode)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return model.ColorProof{}, fmt.Errorf("%w: %s", ErrBatchNotLinked, runCode)
+		}
+		return model.ColorProof{}, err
+	}
+	if run.Status != string(constants.RunStateProofing) {
+		return model.ColorProof{}, fmt.Errorf("%w: %s 当前 %s", ErrBatchNotProofing, run.Code, run.Status)
+	}
+	if run.Tolerance <= 0 {
+		return model.ColorProof{}, fmt.Errorf("%w: %s", ErrToleranceMissing, run.Code)
+	}
+	expectedRunVersion := input.ExpectedRunVersion
+	if expectedRunVersion == 0 {
+		expectedRunVersion = run.Version
+	}
+	if expectedRunVersion != run.Version {
+		return model.ColorProof{}, fmt.Errorf("%w: 批次 %s 已变更至 v%d", repository.ErrVersionConflict, run.Code, run.Version)
+	}
+
+	deviation := current.MetricValue
+	within := deviation <= run.Tolerance
+	verdict := ProofVerdictOutOfTolerance
+	if within {
+		verdict = ProofVerdictWithinTolerance
+	} else {
+		run.Status = string(constants.RunStateHold)
+	}
 	current.Status = target
 	current.Version = input.ExpectedVersion + 1
-	current.UpdatedAt = time.Now().UTC()
-	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current); err != nil {
-		return model.ColorProof{}, fmt.Errorf("transition 色彩校样: %w", err)
-	}
-	if err := s.security.Audit(ctx, actor, requestID, "transition", "ColorProof", id, before, target, input.Reason); err != nil {
-		return model.ColorProof{}, fmt.Errorf("persist transition audit: %w", err)
+	run.Version = expectedRunVersion + 1
+	now := time.Now().UTC()
+	current.UpdatedAt = now
+	run.UpdatedAt = now
+
+	reason := fmt.Sprintf("校样 %s 实测色差 %.4f%s，同批次容差 %.4f%s：%s（%s）",
+		current.Code, deviation, current.MetricUnit, run.Tolerance, run.MetricUnit, verdict, strings.TrimSpace(input.Reason))
+	reason = truncateRunes(reason, 500)
+	if err := s.runs.AcceptProof(ctx, repository.ProofAcceptance{
+		Run: &run, ExpectedRunVersion: expectedRunVersion,
+		Proof: &current, ExpectedProofVersion: input.ExpectedVersion,
+		Reviewer: actor, RequestID: requestID, Reason: reason, Verdict: verdict,
+	}); err != nil {
+		return model.ColorProof{}, fmt.Errorf("accept 色彩校样: %w", err)
 	}
 	return s.repository.Get(ctx, id)
 }
@@ -134,4 +200,12 @@ func validateColorProofBusinessFields(code, name, facility, owner string) error 
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+func truncateRunes(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max])
 }

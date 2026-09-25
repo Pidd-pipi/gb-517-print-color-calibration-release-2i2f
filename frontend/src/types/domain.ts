@@ -12,6 +12,7 @@ export interface DomainRecord {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   metricValue: number;
   metricUnit: string;
+  tolerance?: number;
   effectiveAt: string;
   evidence: string;
   relatedCode: string;
@@ -22,7 +23,8 @@ export interface DomainRecord {
 
 export interface RevisionRecord {
   id: number; version: number; status: string; name: string; metricValue: number;
-  metricUnit: string; evidence: string; actor: string; requestId: string; reason: string; createdAt: string;
+  metricUnit: string; tolerance?: number; proofCode?: string; proofValue?: number;
+  proofVerdict?: string; evidence: string; actor: string; requestId: string; reason: string; createdAt: string;
 }
 
 export interface PageMeta { page: number; pageSize: number; total: number }

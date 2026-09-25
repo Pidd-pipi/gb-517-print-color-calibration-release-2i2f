@@ -48,12 +48,29 @@ export function EntityPage({ config, useStore }: { config: EntityConfig; useStor
     const now = Date.now();
     await createRecord(config.path, { code: `${config.key.toUpperCase()}-${now.toString().slice(-6)}`, name: `新增${config.label}`,
       description: '通过前端工作台创建的业务记录', facility: '默认作业区', owner: session?.username || 'operator', category: '常规', riskLevel: 'medium',
-      metricValue: 2.4, metricUnit: 'ΔE', effectiveAt: new Date().toISOString(), evidence: '已完成创建前色彩检查', relatedCode: 'PR-001' });
+      metricValue: config.key === 'printRun' ? 0 : 2.4, metricUnit: 'ΔE', tolerance: 3.0, effectiveAt: new Date().toISOString(), evidence: '已完成创建前色彩检查', relatedCode: 'PR-003' });
     setShowCreate(false);
   };
   const openDetail = async (item: DomainRecord) => {
     try { setDetail((await request<DomainRecord>(`/${config.path}/${item.id}`)).data); }
     catch { setDetail(item); }
+  };
+
+  // Accepting a proof moves the linked batch as well, so pin the batch version
+  // the reviewer currently sees: a batch changed meanwhile makes the backend
+  // reject the whole request instead of landing the proof status on its own.
+  const confirmTransition = async () => {
+    const current = pending;
+    if (!current) return;
+    const extra: Record<string, unknown> = {};
+    if (config.key === 'colorProof' && current.status === 'accepted' && current.item.relatedCode) {
+      const runPage = await request<DomainRecord[]>(`/runs?page=1&pageSize=100&search=${encodeURIComponent(current.item.relatedCode)}`);
+      const run = runPage.data.find((candidate) => candidate.code === current.item.relatedCode);
+      if (!run) throw new Error(`未找到关联批次 ${current.item.relatedCode}`);
+      extra.expectedRunVersion = run.version;
+    }
+    await transition(config.path, current.item, current.status, extra);
+    setPending(null);
   };
 
   return <main className="workspace">
@@ -63,12 +80,12 @@ export function EntityPage({ config, useStore }: { config: EntityConfig; useStor
     <section className="toolbar"><input aria-label="搜索" placeholder={`搜索${config.label}编码或名称`} value={search} onChange={(event) => setSearch(event.target.value)} /><UiButton onClick={() => { setPage(1); setSubmittedSearch(search); }}>查询</UiButton><button className="link-button" onClick={() => { setSearch(''); setSubmittedSearch(''); setPage(1); }}>重置</button></section>
     {error && <div className="alert" role="alert">{error}</div>}
     <section className="table-shell" aria-busy={loading}><table><thead><tr><th>编码</th><th>名称</th><th>状态</th><th>风险</th><th>责任人</th><th>指标</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
-      {items.map((item) => { const target = nextPermittedStatus(config, item.status, canReview); return <tr key={item.id}><td><strong>{item.code}</strong></td><td><button className="record-link" onClick={() => void openDetail(item)}>{item.name}</button><small>{item.facility}</small></td><td>{config.key === 'printRun' ? <RunStateBadge state={item.status as RunState}/> : <StatusBadge status={item.status}/>} {config.key === 'releaseDecision' && <RunStateBadge state={decisionRunState(item.status)}/>}</td><td>{item.riskLevel}</td><td>{item.owner}</td><td>{item.metricValue} {item.metricUnit}</td><td>{formatDate(item.updatedAt)}</td><td>{canWrite && target ? <button className="table-action" onClick={() => setPending({ item, status: target })}>推进至 {target}</button> : <button className="table-action" onClick={() => void openDetail(item)}>查看详情</button>}</td></tr>; })}
+      {items.map((item) => { const target = nextPermittedStatus(config, item.status, canReview); return <tr key={item.id}><td><strong>{item.code}</strong></td><td><button className="record-link" onClick={() => void openDetail(item)}>{item.name}</button><small>{item.facility}</small></td><td>{config.key === 'printRun' ? <RunStateBadge state={item.status as RunState}/> : <StatusBadge status={item.status}/>} {config.key === 'releaseDecision' && <RunStateBadge state={decisionRunState(item.status)}/>}</td><td>{item.riskLevel}</td><td>{item.owner}</td><td>{item.metricValue} {item.metricUnit}{config.key === 'printRun' && typeof item.tolerance === 'number' ? <small>容差 ≤ {item.tolerance} {item.metricUnit}</small> : null}</td><td>{formatDate(item.updatedAt)}</td><td>{canWrite && target ? <button className="table-action" onClick={() => setPending({ item, status: target })}>推进至 {target}</button> : <button className="table-action" onClick={() => void openDetail(item)}>查看详情</button>}</td></tr>; })}
       {!items.length && !loading && <tr><td colSpan={8}><EmptyState title="没有匹配记录" detail="可清空搜索条件后重新查询" /></td></tr>}
     </tbody></table>{loading && <div className="loading">正在同步业务数据…</div>}</section>
     <footer className="pagination"><button onClick={previous} disabled={page <= 1}>上一页</button><span>第 {page} / {pages} 页</span><button onClick={next} disabled={page >= pages}>下一页</button></footer>
     <ConfirmDialog open={showCreate} title={`新增${config.label}`} onCancel={() => setShowCreate(false)} onConfirm={() => void createDemo()}><p>将创建一条包含完整责任人、风险和证据信息的演示记录。</p></ConfirmDialog>
-    <ConfirmDialog open={Boolean(pending)} title="确认状态迁移" onCancel={() => setPending(null)} onConfirm={() => { if (pending) void transition(config.path, pending.item, pending.status).then(() => setPending(null)); }}><p>状态迁移会写入审计日志；色彩配置和放行决定同时生成不可变版本。</p><strong>{pending?.item.status} → {pending?.status}</strong></ConfirmDialog>
-    <ConfirmDialog open={Boolean(detail)} title={`${detail?.code || ''} 记录详情`} onCancel={() => setDetail(null)} onConfirm={() => setDetail(null)}>{detail && <div className="detail-content"><p>{detail.description}</p><dl><div><dt>证据</dt><dd>{detail.evidence || '-'}</dd></div><div><dt>当前版本</dt><dd>v{detail.version}</dd></div></dl><ColorTable records={[detail]} title="记录色彩读数" />{detail.revisions?.length ? <div className="revision-list"><h3>版本链</h3>{detail.revisions.map((revision) => <article key={revision.id}><strong>v{revision.version} · {revision.status}</strong><span>{revision.actor} · {revision.reason}</span><code>{revision.requestId}</code></article>)}</div> : null}</div>}</ConfirmDialog>
+    <ConfirmDialog open={Boolean(pending)} title="确认状态迁移" onCancel={() => setPending(null)} onConfirm={() => void confirmTransition()}><p>状态迁移会写入审计日志；色彩配置和放行决定同时生成不可变版本。</p>{config.key === 'colorProof' && pending?.status === 'accepted' && <p className="gate-note">接收校样会按同批次容差判定：实测值超限时批次将转入「等待」并阻止放行，且批次版本需与当前一致。</p>}<strong>{pending?.item.status} → {pending?.status}</strong></ConfirmDialog>
+    <ConfirmDialog open={Boolean(detail)} title={`${detail?.code || ''} 记录详情`} onCancel={() => setDetail(null)} onConfirm={() => setDetail(null)}>{detail && <div className="detail-content"><p>{detail.description}</p><dl><div><dt>证据</dt><dd>{detail.evidence || '-'}</dd></div><div><dt>当前版本</dt><dd>v{detail.version}</dd></div>{typeof detail.tolerance === 'number' && <div><dt>同批次容差</dt><dd>≤ {detail.tolerance} {detail.metricUnit}</dd></div>}</dl><ColorTable records={[detail]} title="记录色彩读数" />{detail.revisions?.length ? <div className="revision-list"><h3>版本链</h3>{detail.revisions.map((revision) => <article key={revision.id}><strong>v{revision.version} · {revision.status}</strong><span>{revision.actor} · {revision.reason}</span>{revision.proofVerdict && <dl className="proof-verdict"><div><dt>校样</dt><dd>{revision.proofCode}</dd></div><div><dt>实测值</dt><dd>{revision.proofValue} {revision.metricUnit}</dd></div><div><dt>容差</dt><dd>{revision.tolerance} {revision.metricUnit}</dd></div><div><dt>判定</dt><dd>{revision.proofVerdict === 'within-tolerance' ? '合格 · 保持校样中' : '超限 · 批次转等待'}</dd></div><div><dt>操作人</dt><dd>{revision.actor}</dd></div></dl>}<code>{revision.requestId}</code></article>)}</div> : null}</div>}</ConfirmDialog>
   </main>;
 }
